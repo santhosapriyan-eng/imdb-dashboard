@@ -1,0 +1,12 @@
+{
+  "name": "IMDb Box Office Dashboard",
+  "short_name": "BoxOffice",
+  "description": "Real-time IMDb US Top Box Office data",
+  "theme_color": "#080811",
+  "background_color": "#080811",
+  "display": "standalone",
+  "start_url": "/",
+  "icons": [
+    { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml" }
+  ]
+}
