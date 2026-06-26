@@ -1,130 +1,83 @@
-const axios = require('axios');
-const cheerio = require('cheerio');
+const puppeteer = require('puppeteer');
 
-const IMDB_URL = 'https://www.imdb.com/chart/boxoffice';
-
-const HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-  'Accept-Language': 'en-US,en;q=0.9',
-  'Accept-Encoding': 'gzip, deflate, br',
-  'Cache-Control': 'no-cache',
-  'Pragma': 'no-cache',
-  'Referer': 'https://www.imdb.com/',
-  'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="120"',
-  'sec-ch-ua-mobile': '?0',
-  'sec-ch-ua-platform': '"Windows"',
-  'Sec-Fetch-Dest': 'document',
-  'Sec-Fetch-Mode': 'navigate',
-  'Sec-Fetch-Site': 'same-origin',
-  'Upgrade-Insecure-Requests': '1'
-};
+const IMDB_URL = 'https://www.imdb.com/chart/boxoffice/';
 
 async function scrapeIMDb() {
+  let browser;
+
   try {
     console.log('🎬 Scraping IMDb Box Office data...');
-    
-    const response = await axios.get(IMDB_URL, {
-      headers: HEADERS,
-      timeout: 15000
+
+    browser = await puppeteer.launch({
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox']
     });
 
-    const $ = cheerio.load(response.data);
-    const movies = [];
+    const page = await browser.newPage();
 
-    // Try multiple selectors for IMDb's various layouts
-    // IMDb uses different structures - try JSON-LD first
-    let jsonLdData = null;
-    $('script[type="application/ld+json"]').each((_, el) => {
-      try {
-        const data = JSON.parse($(el).html());
-        if (data['@type'] === 'ItemList') {
-          jsonLdData = data;
-        }
-      } catch(e) {}
+    await page.setUserAgent(
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36'
+    );
+
+    await page.goto(IMDB_URL, {
+      waitUntil: 'networkidle2',
+      timeout: 60000
     });
 
-    // Try scraping from the HTML table/list structure
-    const rows = $('tr.chart-layoutrow, .chart-row, [data-testid="chart-layout-main-column"] tr, .lister-list tr').toArray();
-    
-    // Also try the newer IMDb layout
-    const listItems = $('[data-testid="chart-layout-main-column"] li, .ipc-metadata-list li').toArray();
+    // Give IMDb some time to render
+    await new Promise(resolve => setTimeout(resolve, 3000));
 
-    let rank = 1;
+    const movies = await page.evaluate(() => {
+      const data = [];
 
-    if (listItems.length > 0) {
-      // New IMDb layout
-      listItems.slice(0, 10).forEach((item) => {
-        const $item = $(item);
-        
-        const title = $item.find('[data-testid="title"], .ipc-title__text, h3').first().text().trim()
-          .replace(/^\d+\.\s*/, '').trim();
-        
-        const href = $item.find('a[href*="/title/"]').first().attr('href') || '';
-        const imdbUrl = href ? `https://www.imdb.com${href.split('?')[0]}` : '';
-        
-        const poster = $item.find('img').first().attr('src') || 
-                       $item.find('img').first().attr('srcset')?.split(',').pop()?.trim().split(' ')[0] || '';
-        
-        const metaTexts = $item.find('[data-testid="title-metadata-widget"] span, .sc-f30335b4 span, .cli-title-metadata span').map((_, el) => $(el).text().trim()).toArray();
-        
-        const grossTexts = $item.find('[data-testid*="gross"], span').map((_, el) => $(el).text().trim()).toArray()
-          .filter(t => t.includes('$') || t.includes('M') || t.includes('K'));
+      const links = [
+        ...document.querySelectorAll('a[href*="/title/"]')
+      ];
 
-        if (title && title.length > 1) {
-          movies.push({
-            rank: rank++,
+      const seen = new Set();
+
+      links.forEach((link) => {
+        const title = link.innerText.trim();
+
+        if (
+          title &&
+          title.length > 1 &&
+          !seen.has(title)
+        ) {
+          seen.add(title);
+
+          data.push({
+            rank: data.length + 1,
             title,
-            weekendGross: grossTexts[0] || 'N/A',
-            totalGross: grossTexts[1] || 'N/A',
-            weeks: parseInt(metaTexts.find(t => /^\d+$/.test(t)) || '1') || 1,
-            imdbUrl,
-            poster: poster || ''
-          });
-        }
-      });
-    }
-
-    if (rows.length > 0 && movies.length === 0) {
-      // Old table layout
-      rows.slice(0, 10).forEach((row) => {
-        const $row = $(row);
-        
-        const titleEl = $row.find('.titleColumn a, td.titleColumn a');
-        const title = titleEl.text().trim();
-        const href = titleEl.attr('href') || '';
-        const imdbUrl = href ? `https://www.imdb.com${href}` : '';
-        
-        const poster = $row.find('img').attr('src') || '';
-        const cells = $row.find('td').map((_, td) => $(td).text().trim()).toArray();
-        
-        if (title) {
-          movies.push({
-            rank: rank++,
-            title,
-            weekendGross: cells.find(c => c.includes('$')) || 'N/A',
-            totalGross: cells.filter(c => c.includes('$'))[1] || 'N/A',
+            weekendGross: 'N/A',
+            totalGross: 'N/A',
             weeks: 1,
-            imdbUrl,
-            poster
+            imdbUrl:
+              'https://www.imdb.com' +
+              link.getAttribute('href').split('?')[0],
+            poster: ''
           });
         }
       });
-    }
 
-    // If scraping failed or returned too few results, return mock data for demo
-    if (movies.length < 3) {
-      console.log('⚠️  Live scraping returned insufficient data, using demo data');
+      return data.slice(0, 10);
+    });
+
+    console.log(`✅ Scraped ${movies.length} movies`);
+
+    if (movies.length === 0) {
+      console.log('⚠️ Using fallback data...');
       return getMockData();
     }
 
-    console.log(`✅ Scraped ${movies.length} movies successfully`);
     return movies;
-
   } catch (error) {
     console.error('❌ Scraping error:', error.message);
-    console.log('📦 Falling back to demo data');
     return getMockData();
+  } finally {
+    if (browser) {
+      await browser.close();
+    }
   }
 }
 
@@ -137,7 +90,7 @@ function getMockData() {
       totalGross: "$498.9M",
       weeks: 3,
       imdbUrl: "https://www.imdb.com/title/tt22022452/",
-      poster: "https://m.media-amazon.com/images/M/MV5BOTggMWM0OGQtNjNlYy00MDM5LTgyMjYtYWYzOTY0MzY1NmIzXkEyXkFqcGdeQXVyMTkxNjUyNQ@@._V1_UX67_CR0,0,67,98_AL_.jpg"
+      poster: ""
     },
     {
       rank: 2,
@@ -146,7 +99,7 @@ function getMockData() {
       totalGross: "$134.7M",
       weeks: 2,
       imdbUrl: "https://www.imdb.com/title/tt14444726/",
-      poster: "https://m.media-amazon.com/images/M/MV5BYmQ2MjM5MDYtMzlkMy00OTM5LTg3ODctYTgxNmI5ZTIwNzRlXkEyXkFqcGdeQXVyMjkwOTAyMDU@._V1_UX67_CR0,0,67,98_AL_.jpg"
+      poster: ""
     },
     {
       rank: 3,
@@ -155,7 +108,7 @@ function getMockData() {
       totalGross: "$26.5M",
       weeks: 2,
       imdbUrl: "https://www.imdb.com/title/tt13560574/",
-      poster: "https://m.media-amazon.com/images/M/MV5BNjhlMjQ0MjQtN2EyZS00M2M5LTlhMzMtMzM3MzU1MWMxZTlhXkEyXkFqcGdeQXVyMDM2NDM2MQ@@._V1_UX67_CR0,0,67,98_AL_.jpg"
+      poster: ""
     },
     {
       rank: 4,
@@ -164,7 +117,7 @@ function getMockData() {
       totalGross: "$187.3M",
       weeks: 6,
       imdbUrl: "https://www.imdb.com/title/tt13358894/",
-      poster: "https://m.media-amazon.com/images/M/MV5BOGM3OTQ5YjgtY2YzZC00ZWE2LTliNDQtNmJhZWY2ZTlkNDRmXkEyXkFqcGdeQXVyMjkwOTAyMDU@._V1_UX67_CR0,0,67,98_AL_.jpg"
+      poster: ""
     },
     {
       rank: 5,
@@ -173,7 +126,7 @@ function getMockData() {
       totalGross: "$19.2M",
       weeks: 2,
       imdbUrl: "https://www.imdb.com/title/tt11057302/",
-      poster: "https://m.media-amazon.com/images/M/MV5BOGNiNGJiYTctOTFlZC00NGVlLThkYzgtZmQ4NjE1ZTY1ODliXkEyXkFqcGdeQXVyMTkxNjUyNQ@@._V1_UX67_CR0,0,67,98_AL_.jpg"
+      poster: ""
     },
     {
       rank: 6,
@@ -181,8 +134,8 @@ function getMockData() {
       weekendGross: "$4.8M",
       totalGross: "$83.1M",
       weeks: 5,
-      imdbUrl: "https://www.imdb.com/title/tt5974556/",
-      poster: "https://m.media-amazon.com/images/M/MV5BOWEzMGMzOTktZThmYi00ZDViLTlmZGMtNWI2NzZhYTFkYWZmXkEyXkFqcGdeQXVyMTkxNjUyNQ@@._V1_UX67_CR0,0,67,98_AL_.jpg"
+      imdbUrl: "https://www.imdb.com/title/tt5779228/",
+      poster: ""
     },
     {
       rank: 7,
@@ -190,8 +143,8 @@ function getMockData() {
       weekendGross: "$4.2M",
       totalGross: "$14.8M",
       weeks: 2,
-      imdbUrl: "https://www.imdb.com/title/tt13433812/",
-      poster: "https://m.media-amazon.com/images/M/MV5BZWNlYWRiNTQtNzM3OS00MzVmLWE0YTgtNzRlNmFiMzU0ZjI2XkEyXkFqcGdeQXVyMTkxNjUyNQ@@._V1_UX67_CR0,0,67,98_AL_.jpg"
+      imdbUrl: "https://www.imdb.com/title/tt26736843/",
+      poster: ""
     },
     {
       rank: 8,
@@ -199,8 +152,8 @@ function getMockData() {
       weekendGross: "$3.1M",
       totalGross: "$55.6M",
       weeks: 7,
-      imdbUrl: "https://www.imdb.com/title/tt14849194/",
-      poster: "https://m.media-amazon.com/images/M/MV5BMTYyNTk2NTk2MF5BMl5BanBnXkFtZTcwNjU4NzExMw@@._V1_UX67_CR0,0,67,98_AL_.jpg"
+      imdbUrl: "https://www.imdb.com/title/tt11152168/",
+      poster: ""
     },
     {
       rank: 9,
@@ -209,7 +162,7 @@ function getMockData() {
       totalGross: "$168.5M",
       weeks: 8,
       imdbUrl: "https://www.imdb.com/title/tt11389872/",
-      poster: "https://m.media-amazon.com/images/M/MV5BM2FiMjUyNWQtYThiNC00ZjgzLTgxMmYtMjU1ZDlhNGM1NjE1XkEyXkFqcGdeQXVyMDM2NDM2MQ@@._V1_UX67_CR0,0,67,98_AL_.jpg"
+      poster: ""
     },
     {
       rank: 10,
@@ -218,9 +171,12 @@ function getMockData() {
       totalGross: "$68.3M",
       weeks: 7,
       imdbUrl: "https://www.imdb.com/title/tt12037194/",
-      poster: "https://m.media-amazon.com/images/M/MV5BMTZhNjVmNzctZDBhZi00MmY3LWI2NzktYzU2YzNhMzkzMTdlXkEyXkFqcGdeQXVyMDM2NDM2MQ@@._V1_UX67_CR0,0,67,98_AL_.jpg"
+      poster: ""
     }
   ];
 }
 
-module.exports = { scrapeIMDb, getMockData };
+module.exports = {
+  scrapeIMDb,
+  getMockData
+};

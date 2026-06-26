@@ -40,13 +40,11 @@ async function start() {
     console.log('✅ MongoDB connected');
 
     // Initial seed if empty
-    const count = await Movie.countDocuments();
-    if (count === 0) {
-      console.log('📦 Seeding initial data...');
-      const data = await scrapeIMDb();
-      await Movie.insertMany(data);
-      console.log(`🎬 Seeded ${data.length} movies`);
-    }
+   console.log('📦 Refreshing data...');
+   await Movie.deleteMany({});
+   const data = await scrapeIMDb();
+   await Movie.insertMany(data);
+   console.log(`🎬 Seeded ${data.length} movies`);
 
     app.listen(PORT, () => {
       console.log(`🚀 Server running on http://localhost:${PORT}`);
